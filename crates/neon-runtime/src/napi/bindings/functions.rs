@@ -349,15 +349,34 @@ unsafe fn get_version(host: &libloading::Library, env: Env) -> Result<u32, liblo
     Ok(version)
 }
 
-pub(crate) unsafe fn load(env: Env) -> Result<(), libloading::Error> {
+unsafe fn get_host_and_version(env: Env) -> Result<(libloading::Library, u32), libloading::Error> {
     #[cfg(not(windows))]
-    let host = libloading::os::unix::Library::this().into();
-    #[cfg(windows)]
-    let host = libloading::os::windows::Library::this()?.into();
+    {
+        let host = libloading::os::unix::Library::this().into();
+        // This never fail since `get_version` is in N-API Version 1 and the module will fail
+        // with `Error: Module did not self-register` if N-API does not exist.
+        let version = get_version(&host, env).expect("Failed to find N-API version");
 
-    // This never fail since `get_version` is in N-API Version 1 and the module will fail
-    // with `Error: Module did not self-register` if N-API does not exist.
-    let version = get_version(&host, env).expect("Failed to find N-API version");
+        Ok((host, version))
+    }
+    #[cfg(windows)]
+    {
+        // The N-API symbols could either be in the main executable if loaded in a regular Electron
+        // application or in an electron DLL if loaded in a exe that links to Electron dynamically.
+        let host = libloading::os::windows::Library::this()?.into();
+        match get_version(&host, env) {
+            Ok(version) => Ok((host, version)),
+            Err(_) => {
+                let host = libloading::os::windows::Library::open_already_loaded("electron")?.into();
+                let version = get_version(&host, env).expect("Failed to find N-API version");
+                Ok((host, version))
+            },
+        }
+    }
+}
+
+pub(crate) unsafe fn load(env: Env) -> Result<(), libloading::Error> {
+    let (host, version) = get_host_and_version(env).expect("Failed to find N-API version");
 
     napi1::load(&host, version, 1)?;
 
